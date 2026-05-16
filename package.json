@@ -1,0 +1,23 @@
+{
+  "name": "synca",
+  "version": "0.1.0",
+  "description": "Интерактивная синхронизация проектов между папками",
+  "type": "module",
+  "bin": {
+    "synca": "./bin/synca.js"
+  },
+  "scripts": {
+    "start": "node bin/synca.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^7.0.0",
+    "cli-progress": "^3.12.0",
+    "cli-table3": "^0.6.5",
+    "ora": "^8.1.0",
+    "picocolors": "^1.1.0",
+    "xxhash-addon": "^2.0.3"
+  }
+}
