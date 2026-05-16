@@ -19,6 +19,28 @@ import { moveToTrash, makeTrashBatchPath, pruneEmptyDirs } from './trash.js';
 // 1.jpg, 2.jpg, 3.jpg или IMG_4022 / IMG_4023 от ложного склеивания в группу.
 const MIN_BASE_NAME_LEN = 4;
 
+// Папки и расширения, которые исключаем ИЗ ПОИСКА ДУБЛИКАТОВ (но не из синхронизации).
+// Текстуры и растровые картинки часто имеют похожие имена (palette_1, brick_2) или дублируются
+// между проектами как материалы — пользователю обычно неинтересно их разгребать.
+const DUP_IGNORE_DIR_NAMES = new Set(['textures', 'текстуры']);
+const DUP_IGNORE_EXTS = new Set([
+  '.jpg', '.jpeg', '.png', '.gif', '.bmp', '.webp', '.tiff', '.tif',
+]);
+
+// Фильтр: оставить только те файлы, которые подходят для поиска дубликатов.
+function filterForDuplicates(files) {
+  return files.filter((f) => {
+    const ext = path.extname(f.relPath).toLowerCase();
+    if (DUP_IGNORE_EXTS.has(ext)) return false;
+    // Проверяем каждый сегмент пути (без учёта регистра)
+    const segments = f.relPath.split(/[\\/]/).map((s) => s.toLowerCase());
+    for (const seg of segments) {
+      if (DUP_IGNORE_DIR_NAMES.has(seg)) return false;
+    }
+    return true;
+  });
+}
+
 // Группирует файлы по «голому имени» в рамках одной папки.
 // «Голое имя» = basename без расширения, без версионных хвостов (_1, _v2, _final…).
 // Если у двух файлов в одной папке голые имена совпадают точно — это версии одного файла.
@@ -218,8 +240,9 @@ export async function findSimilarByName(sourceRoot, ignorePatterns) {
   console.log();
 
   const spinner = ora({ text: 'Сканирую источник…', spinner: 'dots' }).start();
-  const files = await scanDirectory(sourceRoot, ignorePatterns);
-  spinner.succeed(`Найдено ${files.length} файлов`);
+  const allFiles = await scanDirectory(sourceRoot, ignorePatterns);
+  const files = filterForDuplicates(allFiles);
+  spinner.succeed(`Найдено ${files.length} файлов (из ${allFiles.length}, исключены текстуры и картинки)`);
 
   const groups = groupSimilarByName(files, sourceRoot);
   if (groups.length === 0) {
@@ -261,8 +284,9 @@ export async function findIdenticalByContent(sourceRoot, ignorePatterns) {
   console.log();
 
   const spinner = ora({ text: 'Сканирую источник…', spinner: 'dots' }).start();
-  const files = await scanDirectory(sourceRoot, ignorePatterns);
-  spinner.succeed(`Найдено ${files.length} файлов`);
+  const allFiles = await scanDirectory(sourceRoot, ignorePatterns);
+  const files = filterForDuplicates(allFiles);
+  spinner.succeed(`Найдено ${files.length} файлов (из ${allFiles.length}, исключены текстуры и картинки)`);
 
   const groups = await groupIdenticalByHash(files, sourceRoot);
   if (groups.length === 0) {
