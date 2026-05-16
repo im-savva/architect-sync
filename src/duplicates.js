@@ -137,9 +137,17 @@ async function interactiveSelectForDeletion(groups, { groupLabel }) {
     // Сортируем: самый новый сверху (по compareNewness — bigger is newer, reverse)
     group.files.sort((a, b) => compareNewness(b, a));
 
+    // Файлы могут быть из разных папок (особенно в режиме «идентичные по содержимому»).
+    // Показываем заголовок группы и общую часть пути если он общий, иначе намёк «в N папках».
+    const parents = [...new Set(group.files.map((f) => f.parent))];
+    const parentLabel =
+      parents.length === 1
+        ? parents[0] || '/'
+        : `в ${parents.length} разных папках`;
+
     console.log();
     console.log(pc.bold(`  Группа ${i + 1} / ${groups.length}: ${groupLabel(group)}`));
-    console.log(pc.dim(`  Папка: ${group.files[0].parent || '/'}`));
+    console.log(pc.dim(`  ${parentLabel}`));
     console.log();
 
     const choices = group.files.map((f, idx) => {
@@ -148,8 +156,10 @@ async function interactiveSelectForDeletion(groups, { groupLabel }) {
       const mtimeLabel = new Date(f.mtime).toISOString().slice(0, 10);
       const sizeLabel = formatBytes(f.size);
       const tag = idx === 0 ? pc.green(' [новейший]') : '';
+      // Показываем полный относительный путь — пользователю важно видеть в какой именно подпапке файл.
+      const displayPath = truncatePath(f.relPath, 60).padEnd(62);
       return {
-        name: `${truncatePath(f.baseName, 50).padEnd(52)}  ${pc.dim(mtimeLabel)}  ${pc.dim(sizeLabel.padStart(10))}${pc.dim(versionLabel)}${tag}`,
+        name: `${displayPath}  ${pc.dim(mtimeLabel)}  ${pc.dim(sizeLabel.padStart(10))}${pc.dim(versionLabel)}${tag}`,
         value: f.relPath,
         checked: idx !== 0,
       };
