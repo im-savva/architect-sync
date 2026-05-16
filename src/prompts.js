@@ -99,9 +99,18 @@ const selectWithBack = createPrompt((config, done) => {
     loop: true,
   });
 
-  const help = backable
-    ? pc.dim('  ↑↓ выбор · Enter подтвердить · Esc назад')
-    : pc.dim('  ↑↓ выбор · Enter подтвердить');
+  const helpText =
+    config.helpText ??
+    (backable
+      ? '↑↓ выбор · Enter подтвердить · Esc назад'
+      : '↑↓ выбор · Enter подтвердить');
+
+  const RULE = '─'.repeat(50);
+  const help =
+    '\n' +
+    pc.dim('  ' + RULE) +
+    '\n' +
+    pc.dim('  ' + helpText);
 
   return `${prefix} ${message}\n${page}\n${help}`;
 });
@@ -169,6 +178,18 @@ export async function mainMenu() {
   });
 }
 
+// Меню режима поиска дубликатов
+export async function duplicatesMenu() {
+  return selectOrThrow({
+    message: 'Какие дубликаты искать?',
+    choices: [
+      { name: ACTION('Похожие по имени (детская_1, детская_2, детская_v3…)'), value: 'similar' },
+      { name: ACTION('Точно одинаковые по содержимому'), value: 'identical' },
+      { name: BACK_ICON('Назад'), value: 'back' },
+    ],
+  });
+}
+
 // Меню настроек
 export async function settingsMenu() {
   return selectOrThrow({
@@ -213,15 +234,14 @@ export async function confirmApply() {
   });
 }
 
-// Прокручиваемый список изменений. Любой выбор возвращает обратно.
+// Прокручиваемый список изменений.
+// Все строки — активные пункты (просто для прокрутки), на любой Enter / Esc возвращаемся.
 export async function viewChangeList(lines) {
   await selectWithBack({
-    message: 'Список изменений (Enter / Esc — вернуться):',
-    choices: [
-      { name: BACK_ICON('Вернуться к подтверждению'), value: 'back' },
-      ...lines.map((line) => ({ name: line, value: 'noop', disabled: ' ' })),
-    ],
+    message: 'Список изменений:',
+    choices: lines.map((line, i) => ({ name: line, value: i })),
     pageSize: 20,
+    helpText: '↑↓ прокрутка · Enter / Esc — вернуться',
   });
 }
 

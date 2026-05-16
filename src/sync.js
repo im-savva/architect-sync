@@ -8,7 +8,7 @@ const { XXHash64 } = xxhashAddon;
 import cliProgress from 'cli-progress';
 import pc from 'picocolors';
 import { toLongPath, nativeRel, formatBytes, sleep, truncatePath } from './utils.js';
-import { moveToTrash, makeTrashBatchPath } from './trash.js';
+import { moveToTrash, makeTrashBatchPath, pruneEmptyDirs } from './trash.js';
 
 const HASH_SEED = Buffer.from([0, 0, 0, 0, 0, 0, 0, 1]);
 const COPY_BUFFER = 64 * 1024;
@@ -162,12 +162,16 @@ export async function applyChanges({
   const stateMap = new Map(stateFiles.map((f) => [f.relPath, f]));
 
   // Сначала удаления (в корзину) — освобождают место.
+  // После каждого удаления убираем опустевшие родительские папки,
+  // чтобы не оставлять мусор пустых директорий в destination.
   for (const f of trashed) {
     if (abortSignal && abortSignal.aborted) break;
     try {
       await moveToTrash(destination, f.relPath, trashBatch);
       log.trashed.push({ relPath: f.relPath, size: f.size });
       stateMap.delete(f.relPath);
+      const srcDir = path.dirname(path.join(destination, nativeRel(f.relPath)));
+      await pruneEmptyDirs(srcDir, destination);
       if (onPartialState) await onPartialState([...stateMap.values()]);
     } catch (err) {
       log.skipped.push({ relPath: f.relPath, reason: 'trash-failed: ' + err.code });

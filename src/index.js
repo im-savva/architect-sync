@@ -26,6 +26,7 @@ import {
 import {
   mainMenu,
   settingsMenu,
+  duplicatesMenu,
   chooseProject,
   confirmApply,
   viewChangeList,
@@ -47,7 +48,7 @@ import {
   getDiskStats,
   formatBytes,
 } from './utils.js';
-import { findAndCleanDuplicates } from './duplicates.js';
+import { findSimilarByName, findIdenticalByContent } from './duplicates.js';
 
 export async function main() {
   let cfg = await loadConfig();
@@ -136,9 +137,7 @@ export async function main() {
           await pressEnterToContinue();
           break;
         case 'duplicates':
-          screen(`${project.name} — поиск дубликатов`);
-          await findAndCleanDuplicates(project.source, cfg.ignore);
-          await pressEnterToContinue();
+          await runDuplicates(project, cfg);
           break;
         case 'settings':
           await runSettings(cfg);
@@ -456,3 +455,27 @@ async function runSettings(cfg) {
   }
 }
 
+async function runDuplicates(project, cfg) {
+  while (true) {
+    screen(`${project.name} — поиск дубликатов`);
+
+    let mode;
+    try {
+      mode = await duplicatesMenu();
+    } catch (err) {
+      if (err?.isBack) return;
+      throw err;
+    }
+    if (mode === 'back') return;
+
+    if (mode === 'similar') {
+      screen(`${project.name} — похожие по имени`);
+      await findSimilarByName(project.source, cfg.ignore);
+      await pressEnterToContinue();
+    } else if (mode === 'identical') {
+      screen(`${project.name} — идентичные по содержимому`);
+      await findIdenticalByContent(project.source, cfg.ignore);
+      await pressEnterToContinue();
+    }
+  }
+}

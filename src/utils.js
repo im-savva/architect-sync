@@ -135,3 +135,61 @@ export function nativeRel(relPath) {
   if (path.sep === '/') return relPath;
   return relPath.split('/').join(path.sep);
 }
+
+// Расстояние Левенштейна с ранним выходом по порогу.
+// Если расстояние превысит maxDistance — возвращает maxDistance + 1 не дочитывая.
+// Без раннего выхода был бы O(m*n) на каждое сравнение, что для тысяч файлов медленно.
+export function levenshtein(a, b, maxDistance = Infinity) {
+  if (a === b) return 0;
+  if (Math.abs(a.length - b.length) > maxDistance) return maxDistance + 1;
+  if (a.length === 0) return b.length;
+  if (b.length === 0) return a.length;
+
+  // Сделаем a короче — экономим память
+  if (a.length > b.length) [a, b] = [b, a];
+
+  const prev = new Array(a.length + 1);
+  const curr = new Array(a.length + 1);
+  for (let i = 0; i <= a.length; i++) prev[i] = i;
+
+  for (let j = 1; j <= b.length; j++) {
+    curr[0] = j;
+    let rowMin = curr[0];
+    for (let i = 1; i <= a.length; i++) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      curr[i] = Math.min(
+        prev[i] + 1,        // удаление
+        curr[i - 1] + 1,    // вставка
+        prev[i - 1] + cost  // замена
+      );
+      if (curr[i] < rowMin) rowMin = curr[i];
+    }
+    if (rowMin > maxDistance) return maxDistance + 1;
+    for (let i = 0; i <= a.length; i++) prev[i] = curr[i];
+  }
+  return prev[a.length];
+}
+
+// Извлекает «номер версии» из имени файла. Возвращает число или null.
+// Эвристика: ищем последнюю цифровую группу в стеме (без расширения).
+// Также распознаём суффиксы final/итог/final2 как заведомо позднее. v3 > v2 > 3 > 2 > отсутствие.
+export function extractVersion(filename) {
+  const stem = filename.replace(/\.[^.]+$/, '').toLowerCase();
+  // final / итог / финал — самый высокий приоритет, дадим базовый бонус 10000 + номер если есть
+  const finalMatch = stem.match(/(?:final|итог|финал)(\d*)/);
+  if (finalMatch) {
+    const n = finalMatch[1] ? parseInt(finalMatch[1], 10) : 1;
+    return 10000 + n;
+  }
+  // v3, v12 — версионный префикс
+  const vMatch = stem.match(/v(\d+)(?!.*\d)/);
+  if (vMatch) {
+    return 1000 + parseInt(vMatch[1], 10);
+  }
+  // Любая последняя цифровая группа: детская_3, копия (2), house3
+  const numMatch = stem.match(/(\d+)(?!.*\d)/);
+  if (numMatch) {
+    return parseInt(numMatch[1], 10);
+  }
+  return null;
+}

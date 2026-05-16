@@ -31,6 +31,23 @@ export async function moveToTrash(destination, relPath, batchDir) {
   }
 }
 
+// Удаляет пустые родительские папки, поднимаясь от directory вверх до stopAt (не включая).
+// Не падает если папка не пуста или не существует.
+export async function pruneEmptyDirs(directory, stopAt) {
+  const stopResolved = path.resolve(stopAt);
+  let current = path.resolve(directory);
+  while (current !== stopResolved && current.startsWith(stopResolved)) {
+    try {
+      const entries = await fs.readdir(toLongPath(current));
+      if (entries.length > 0) return; // не пуста — стоп
+      await fs.rmdir(toLongPath(current));
+    } catch {
+      return; // не получилось — выходим
+    }
+    current = path.dirname(current);
+  }
+}
+
 // Возвращает общий размер всех файлов в корзине + список батчей с размерами и mtime.
 async function scanTrash(destination) {
   const trashRoot = path.join(destination, TRASH_DIR);
