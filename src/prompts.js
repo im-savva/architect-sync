@@ -19,11 +19,16 @@ import { input as inquirerInput, confirm, checkbox as inquirerCheckbox } from '@
 // Также используется в input-обёртке.
 export const BACK = Symbol('BACK');
 
-// Класс-маркер: бросаем такое исключение из обёрток когда пользователь хочет назад.
+// Класс-маркер: бросаем такое исключение из обёрток когда пользователь нажал Esc.
 // Вызывающий код ловит его и возвращается на предыдущий шаг.
+//
+// Важно: мы НЕ перехватываем Ctrl+C — это стандартный «убить процесс».
+// На Windows перехват Ctrl+C через inquirer signal / AbortController нестабилен:
+// ломает stdin (raw mode + висящие listeners) → следующий prompt не реагирует.
+// Esc обрабатывается в raw mode как обычный keypress, без сигналов — стабильно.
 export class BackError extends Error {
   constructor() {
-    super('User pressed Esc / Ctrl+C to go back');
+    super('User pressed Esc to go back');
     this.name = 'BackError';
     this.isBack = true;
   }
@@ -31,12 +36,6 @@ export class BackError extends Error {
 
 function isEscapeKey(key) {
   return key.name === 'escape';
-}
-
-// Ctrl+C поступает в raw mode как keypress с ctrl+c. Используем его как
-// эквивалент «назад» в наших меню (а не как «убить процесс»).
-function isCtrlCKey(key) {
-  return key.ctrl === true && key.name === 'c';
 }
 
 // Кастомный select с поддержкой Esc как «назад».
@@ -64,18 +63,10 @@ const selectWithBack = createPrompt((config, done) => {
       return;
     }
 
-    if (backable && (isEscapeKey(key) || isCtrlCKey(key))) {
+    if (backable && isEscapeKey(key)) {
       setStatus('done');
       done(BACK);
       return;
-    }
-
-    // На корневом меню (backable=false) Ctrl+C = выход из программы.
-    // Иначе пользователь окажется в ловушке: ни Esc, ни Ctrl+C не работают.
-    if (!backable && isCtrlCKey(key)) {
-      setStatus('done');
-      process.stdout.write('\n');
-      process.exit(0);
     }
 
     if (isUpKey(key) || isDownKey(key)) {
@@ -116,7 +107,7 @@ const selectWithBack = createPrompt((config, done) => {
   const helpText =
     config.helpText ??
     (backable
-      ? '↑↓ выбор · Enter подтвердить · Esc / Ctrl+C назад'
+      ? '↑↓ выбор · Enter подтвердить · Esc назад'
       : '↑↓ выбор · Enter подтвердить');
 
   const RULE = '─'.repeat(50);
@@ -129,105 +120,119 @@ const selectWithBack = createPrompt((config, done) => {
   return `${prefix} ${message}\n${page}\n${help}`;
 });
 
-// Восстанавливает stdin после прерывания inquirer prompt через SIGINT.
-// На Windows raw mode и/или listeners не всегда корректно очищаются — следующий
-// prompt может «зависнуть» на ожидании клавиатуры. Делаем это вручную.
-function recoverStdin() {
-  try {
-    if (process.stdin.isTTY && process.stdin.isRaw) {
-      process.stdin.setRawMode(false);
-    }
-  } catch {}
-  try {
-    process.stdin.removeAllListeners('keypress');
-    process.stdin.removeAllListeners('data');
-  } catch {}
-  try {
-    process.stdin.resume();
-  } catch {}
+// inputWithBack — оставлен как имя для совместимости с местами вызова.
+// Раньше перехватывал Ctrl+C → BackError, но это ломало stdin на Windows.
+// Теперь это просто инqиuirer.input — никакого Ctrl+C-перехвата.
+// Чтобы пользователь мог «отменить» wizard, в местах вызова добавим явные пути
+// (например — пустой ввод там, где это уместно).
+export const inputWithBack = inquirerInput;
+
+// Свой checkbox на @inquirer/core с поддержкой Esc как «пропустить группу» (BackError).
+// Стоковый @inquirer/prompts.checkbox не умеет Esc.
+// При Esc промпт бросает BackError (через resolve со sentinel-значением).
+export async function checkboxWithEsc(opts) {
+  const result = await checkboxEscPrompt(opts);
+  if (result === BACK) throw new BackError();
+  return result;
 }
 
-// Обёртка вокруг inquirer checkbox с поддержкой Ctrl+C как «отмена».
-// Ловим SIGINT глобально, abort'им наш AbortController, inquirer корректно завершает
-// промпт через signal (а не через свой sigint-хук), мы чистим stdin и бросаем BackError.
-//
-// Это важнее для checkbox чем для select потому что в checkbox нет «выйти стрелочкой»;
-// единственный способ пропустить группу — это сочетание клавиш.
-export async function checkboxWithCancel(opts) {
-  const ac = new AbortController();
-  const sigintHandler = () => {
-    ac.abort();
-  };
-  process.once('SIGINT', sigintHandler);
-  try {
-    return await inquirerCheckbox({ ...opts, signal: ac.signal });
-  } catch (err) {
-    if (
-      err?.name === 'AbortPromptError' ||
-      err?.name === 'ExitPromptError' ||
-      err?.code === 'ABORT_ERR'
-    ) {
-      recoverStdin();
-      throw new BackError();
-    }
-    throw err;
-  } finally {
-    process.removeListener('SIGINT', sigintHandler);
-    recoverStdin();
-  }
-}
+const checkboxEscPrompt = createPrompt((config, done) => {
+  const items = config.choices.map((c) => ({ ...c, checked: !!c.checked }));
+  const pageSize = config.pageSize ?? 10;
+  const theme = makeTheme();
+  const prefix = usePrefix({ theme });
 
-// Аналогично — confirm с Ctrl+C как «нет/отмена».
-export async function confirmWithCancel(opts) {
-  const ac = new AbortController();
-  const sigintHandler = () => {
-    ac.abort();
-  };
-  process.once('SIGINT', sigintHandler);
-  try {
-    return await confirm({ ...opts, signal: ac.signal });
-  } catch (err) {
-    if (
-      err?.name === 'AbortPromptError' ||
-      err?.name === 'ExitPromptError' ||
-      err?.code === 'ABORT_ERR'
-    ) {
-      recoverStdin();
-      throw new BackError();
-    }
-    throw err;
-  } finally {
-    process.removeListener('SIGINT', sigintHandler);
-    recoverStdin();
-  }
-}
+  const firstSelectable = items.findIndex((c) => !(c instanceof Separator) && !c.disabled);
+  const [active, setActive] = useState(firstSelectable === -1 ? 0 : firstSelectable);
+  const [checkedMap, setCheckedMap] = useState(() => {
+    const m = {};
+    items.forEach((it, i) => { if (it.checked) m[i] = true; });
+    return m;
+  });
+  const [status, setStatus] = useState('idle');
 
-// Обёртка вокруг inquirer input с поддержкой Ctrl+C как «назад» (BackError).
-// Реализовано через AbortController: при SIGINT в pendingом промпте даём signal,
-// prompt бросает исключение, мы конвертируем его в BackError.
-//
-// ВНИМАНИЕ: эта функция временно перехватывает SIGINT на время своего вызова.
-export async function inputWithBack(opts) {
-  const ac = new AbortController();
-  const sigintHandler = () => {
-    ac.abort();
-  };
-  process.once('SIGINT', sigintHandler);
-  try {
-    return await inquirerInput({ ...opts, signal: ac.signal });
-  } catch (err) {
-    // Inquirer бросает специальное AbortPromptError или ExitPromptError при abort/Ctrl+C
-    if (
-      err?.name === 'AbortPromptError' ||
-      err?.name === 'ExitPromptError' ||
-      err?.code === 'ABORT_ERR'
-    ) {
-      throw new BackError();
+  useKeypress((key) => {
+    if (status !== 'idle') return;
+
+    if (isEscapeKey(key)) {
+      setStatus('done');
+      done(BACK);
+      return;
     }
-    throw err;
-  } finally {
-    process.removeListener('SIGINT', sigintHandler);
+
+    if (isEnterKey(key)) {
+      setStatus('done');
+      const selectedValues = items
+        .map((it, i) => (checkedMap[i] ? it.value : undefined))
+        .filter((v) => v !== undefined);
+      done(selectedValues);
+      return;
+    }
+
+    if (isSpaceKey(key)) {
+      const it = items[active];
+      if (!it || it instanceof Separator || it.disabled) return;
+      setCheckedMap({ ...checkedMap, [active]: !checkedMap[active] });
+      return;
+    }
+
+    if (isUpKey(key) || isDownKey(key)) {
+      const delta = isUpKey(key) ? -1 : 1;
+      let next = active;
+      for (let i = 0; i < items.length; i++) {
+        next = (next + delta + items.length) % items.length;
+        const candidate = items[next];
+        if (!(candidate instanceof Separator) && !candidate?.disabled) {
+          setActive(next);
+          return;
+        }
+      }
+    }
+  });
+
+  const message = theme.style.message(config.message, status);
+
+  if (status === 'done') {
+    return `${prefix} ${message}`;
   }
+
+  const page = usePagination({
+    items,
+    active,
+    renderItem: ({ item, index, isActive }) => {
+      if (item instanceof Separator) return item.separator;
+      const checked = !!checkedMap[index];
+      const mark = checked ? pc.green('◉') : pc.dim('◯');
+      const line = item.name;
+      if (item.disabled) return pc.dim(`  ${mark} ` + line);
+      return isActive ? pc.cyan('❯ ') + mark + ' ' + line : '  ' + mark + ' ' + line;
+    },
+    pageSize,
+    loop: true,
+  });
+
+  const RULE = '─'.repeat(50);
+  const help =
+    '\n' +
+    pc.dim('  ' + RULE) +
+    '\n' +
+    pc.dim('  ↑↓ выбор · Space отметить · Enter подтвердить · Esc пропустить');
+
+  return `${prefix} ${message}\n${page}\n${help}`;
+});
+
+// confirmWithEsc — конqирм с поддержкой Esc как «отмена».
+// Стоковый inquirer confirm не умеет Esc. Делаем свой select из «да/нет» + Esc.
+export async function confirmWithEsc(opts) {
+  const result = await selectWithBack({
+    message: opts.message,
+    choices: [
+      { name: pc.green('  ◉') + ' Да', value: true },
+      { name: pc.dim('  ◯') + ' Нет', value: false },
+    ],
+  });
+  if (result === BACK) throw new BackError();
+  return result;
 }
 
 // Утилита: вызвать selectWithBack и сконвертировать BACK в исключение BackError.
@@ -291,12 +296,11 @@ export async function settingsMenu() {
 }
 
 // Выбор проекта (если их несколько). Включает пункт «Добавить проект».
-// Это корневое меню — Esc игнорируется (некуда назад), Ctrl+C = выход.
+// Это корневое меню — Esc игнорируется (некуда назад). Выход — пункт «Выход» в списке.
 export async function chooseProject(projects) {
   return selectWithBack({
     message: 'Выберите проект:',
     backable: false,
-    helpText: '↑↓ выбор · Enter подтвердить · Ctrl+C выход',
     choices: [
       ...projects.map((p, i) => ({
         name: ACTION(`${p.name}  ${pc.dim('(' + p.source + ' → ' + p.destination + ')')}`),
@@ -322,13 +326,13 @@ export async function confirmApply() {
 }
 
 // Прокручиваемый список изменений.
-// Все строки — активные пункты (просто для прокрутки), любой Enter / Esc / Ctrl+C возвращает.
+// Все строки — активные пункты (просто для прокрутки), Enter / Esc возвращает.
 export async function viewChangeList(lines) {
   await selectWithBack({
     message: 'Список изменений:',
     choices: lines.map((line, i) => ({ name: line, value: i })),
     pageSize: 20,
-    helpText: '↑↓ прокрутка · Enter / Esc / Ctrl+C — вернуться',
+    helpText: '↑↓ прокрутка · Enter / Esc — вернуться',
   });
 }
 
@@ -346,3 +350,7 @@ export async function pickProject(projects, message) {
 }
 
 export { selectWithBack as select, confirm, inquirerCheckbox as checkbox };
+
+// Backward-compatibility псевдонимы для duplicates.js
+export const checkboxWithCancel = checkboxWithEsc;
+export const confirmWithCancel = confirmWithEsc;

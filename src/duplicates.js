@@ -158,7 +158,7 @@ async function interactiveSelectForDeletion(groups, { groupLabel }) {
     let selected;
     try {
       selected = await checkboxWithCancel({
-        message: 'Отметьте файлы для удаления (Space — отметить, Enter — подтвердить, Ctrl+C — пропустить группу):',
+        message: 'Отметьте файлы для удаления:',
         choices,
         pageSize: 15,
       });
