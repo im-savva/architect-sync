@@ -9,105 +9,70 @@ import {
   toLongPath,
   nativeRel,
   truncatePath,
-  levenshtein,
   extractVersion,
+  stripVersionSuffix,
 } from './utils.js';
 import { moveToTrash, makeTrashBatchPath, pruneEmptyDirs } from './trash.js';
 
-// Порог Левенштейна = 30% длины более короткого имени (но не меньше 2 и не больше 6).
-// Эмпирика: "детская_1" vs "детская_2" = 1 (ок), "детская" vs "кухня" = 6 (не дубликат).
-// 30% даёт хороший баланс — захватывает "_1/_2/_v3/_final" но не сводит совершенно разные имена.
-function distanceThreshold(a, b) {
-  const minLen = Math.min(a.length, b.length);
-  return Math.max(2, Math.min(6, Math.floor(minLen * 0.3)));
+// Восстанавливает stdin после прерывания checkbox/select через Ctrl+C.
+// На Windows inquirer не всегда корректно сбрасывает raw mode и/или listeners,
+// в результате следующий prompt не воспринимает клавиатуру.
+//
+// Делаем три вещи:
+//   1. Гарантируем что stdin не в raw mode.
+//   2. Снимаем висящие keypress / data слушатели от inquirer.
+//   3. Делаем stdin.resume() — на случай если он был запаузен.
+function recoverStdin() {
+  try {
+    if (process.stdin.isTTY && process.stdin.isRaw) {
+      process.stdin.setRawMode(false);
+    }
+  } catch {}
+  try {
+    process.stdin.removeAllListeners('keypress');
+    process.stdin.removeAllListeners('data');
+  } catch {}
+  try {
+    process.stdin.resume();
+  } catch {}
 }
 
-// «Стем для сравнения» — basename без расширения, нижний регистр.
-// Используется как ключ для Левенштейна (расширение должно совпадать отдельно).
-function compareStem(filename) {
-  return filename.replace(/\.[^.]+$/, '').toLowerCase().trim();
-}
+// Минимальная длина «голого имени» (после снятия версионных хвостов).
+// Имена короче 4 символов — не считаем версионной серией. Это отсекает
+// 1.jpg, 2.jpg, 3.jpg или IMG_4022 / IMG_4023 от ложного склеивания в группу.
+const MIN_BASE_NAME_LEN = 4;
 
-// Группирует файлы по похожести имени **в рамках одной папки**.
-// Алгоритм:
-//   - идём по файлам в каждой папке отдельно
-//   - объединяем в группы файлы с одинаковым расширением, чьи стемы близки по Левенштейну
-//   - возвращаем только группы >= 2 файлов
+// Группирует файлы по «голому имени» в рамках одной папки.
+// «Голое имя» = basename без расширения, без версионных хвостов (_1, _v2, _final…).
+// Если у двух файлов в одной папке голые имена совпадают точно — это версии одного файла.
 function groupSimilarByName(files, sourceRoot) {
-  // Сгруппируем по папке-родителю
-  const byParent = new Map();
+  // Ключ: parent + ':' + ext + ':' + bareName
+  const groupsMap = new Map();
+
   for (const f of files) {
     const parent = path.dirname(f.relPath);
-    if (!byParent.has(parent)) byParent.set(parent, []);
-    byParent.get(parent).push(f);
+    const baseName = path.basename(f.relPath);
+    const ext = path.extname(baseName).toLowerCase();
+    const stem = baseName.slice(0, baseName.length - ext.length);
+    const bare = stripVersionSuffix(stem);
+
+    if (bare.length < MIN_BASE_NAME_LEN) continue; // слишком короткое — не группируем
+
+    const key = parent + ':' + ext + ':' + bare;
+    if (!groupsMap.has(key)) groupsMap.set(key, { parent, ext, bare, files: [] });
+    groupsMap.get(key).files.push({
+      ...f,
+      baseName,
+      absPath: path.join(sourceRoot, nativeRel(f.relPath)),
+      parent,
+      ext,
+    });
   }
 
   const groups = [];
-
-  for (const [parent, parentFiles] of byParent) {
-    if (parentFiles.length < 2) continue;
-
-    // По расширению
-    const byExt = new Map();
-    for (const f of parentFiles) {
-      const ext = path.extname(f.relPath).toLowerCase();
-      if (!byExt.has(ext)) byExt.set(ext, []);
-      byExt.get(ext).push(f);
-    }
-
-    for (const [ext, extFiles] of byExt) {
-      if (extFiles.length < 2) continue;
-
-      // Готовим объекты со стемом для сравнения
-      const items = extFiles.map((f) => ({
-        ...f,
-        baseName: path.basename(f.relPath),
-        stem: compareStem(path.basename(f.relPath)),
-        absPath: path.join(sourceRoot, nativeRel(f.relPath)),
-        parent,
-        ext,
-      }));
-
-      // Union-Find: объединяем близкие по Левенштейну
-      const parent_uf = items.map((_, i) => i);
-      const find = (i) => {
-        while (parent_uf[i] !== i) {
-          parent_uf[i] = parent_uf[parent_uf[i]];
-          i = parent_uf[i];
-        }
-        return i;
-      };
-      const union = (a, b) => {
-        const ra = find(a), rb = find(b);
-        if (ra !== rb) parent_uf[ra] = rb;
-      };
-
-      for (let i = 0; i < items.length; i++) {
-        for (let j = i + 1; j < items.length; j++) {
-          const threshold = distanceThreshold(items[i].stem, items[j].stem);
-          const dist = levenshtein(items[i].stem, items[j].stem, threshold);
-          if (dist <= threshold) {
-            union(i, j);
-          }
-        }
-      }
-
-      // Собираем компоненты связности
-      const components = new Map();
-      for (let i = 0; i < items.length; i++) {
-        const root = find(i);
-        if (!components.has(root)) components.set(root, []);
-        components.get(root).push(items[i]);
-      }
-
-      for (const group of components.values()) {
-        if (group.length >= 2) {
-          groups.push({ parent, ext, files: group });
-        }
-      }
-    }
+  for (const g of groupsMap.values()) {
+    if (g.files.length >= 2) groups.push(g);
   }
-
   return groups;
 }
 
@@ -184,14 +149,16 @@ async function groupIdenticalByHash(files, sourceRoot) {
 
 // Интерактивно проходим по группам и собираем файлы к удалению.
 // Возвращает массив отмеченных к удалению файлов.
+//
+// Ctrl+C на любой группе = пропустить её. После Ctrl+C явно восстанавливаем stdin,
+// иначе на Windows следующий чекбокс перестаёт реагировать на клавиатуру.
 async function interactiveSelectForDeletion(groups, { groupLabel }) {
   const toDelete = [];
 
   for (let i = 0; i < groups.length; i++) {
     const group = groups[i];
-    // Сортируем: самый новый сверху (по compareNewness — bigger is newer, так что reverse)
+    // Сортируем: самый новый сверху (по compareNewness — bigger is newer, reverse)
     group.files.sort((a, b) => compareNewness(b, a));
-    const best = group.files[0];
 
     console.log();
     console.log(pc.bold(`  Группа ${i + 1} / ${groups.length}: ${groupLabel(group)}`));
@@ -207,7 +174,7 @@ async function interactiveSelectForDeletion(groups, { groupLabel }) {
       return {
         name: `${truncatePath(f.baseName, 50).padEnd(52)}  ${pc.dim(mtimeLabel)}  ${pc.dim(sizeLabel.padStart(10))}${pc.dim(versionLabel)}${tag}`,
         value: f.relPath,
-        checked: idx !== 0, // самый новый по умолчанию НЕ помечен к удалению
+        checked: idx !== 0,
       };
     });
 
@@ -224,6 +191,9 @@ async function interactiveSelectForDeletion(groups, { groupLabel }) {
         err?.name === 'ExitPromptError' ||
         err?.code === 'ABORT_ERR'
       ) {
+        // На Windows inquirer не всегда чистит raw mode после Ctrl+C —
+        // следующий чекбокс перестаёт реагировать на ввод. Чиним вручную.
+        recoverStdin();
         console.log(pc.dim('  Группа пропущена'));
         continue;
       }
@@ -357,6 +327,7 @@ async function confirmAndApply(sourceRoot, toDelete) {
       err?.name === 'ExitPromptError' ||
       err?.code === 'ABORT_ERR'
     ) {
+      recoverStdin();
       console.log(pc.dim('  Отменено'));
       return;
     }

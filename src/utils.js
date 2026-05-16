@@ -136,6 +136,40 @@ export function nativeRel(relPath) {
   return relPath.split('/').join(path.sep);
 }
 
+// Снимает «версионные хвосты» с имени файла (без расширения), оставляя «голое имя».
+// Используется чтобы свести 'детская_1', 'детская_v2', 'детская_final' к 'детская'.
+// Если в имени ничего нет кроме цифр/версионных маркеров — вернёт '' (это сигнал «не версия»).
+//
+// Удаляемые хвосты (повторяя пока что-то снимается):
+//   _1, -1, .1, (1), пробел+1   — числовой суффикс с разделителем
+//   _v2, -v2                    — версионный префикс v
+//   _final, _финал, _итог       — финальный маркер (можно с цифрой: _final2)
+//   _copy, _копия               — копия
+//   (числа без разделителя в самом конце НЕ режем — это часть имени, например 'IMG_4022' остаётся как есть)
+export function stripVersionSuffix(stemNoExt) {
+  let s = stemNoExt.toLowerCase();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    // (1), (2)
+    const re1 = /[\s_-]*\(\d+\)$/;
+    if (re1.test(s)) { s = s.replace(re1, ''); changed = true; continue; }
+    // _final, -финал, .итог (опционально с цифрой)
+    const re2 = /[\s_.-]+(final|финал|итог)\d*$/;
+    if (re2.test(s)) { s = s.replace(re2, ''); changed = true; continue; }
+    // _v3, -v12
+    const re3 = /[\s_.-]+v\d+$/;
+    if (re3.test(s)) { s = s.replace(re3, ''); changed = true; continue; }
+    // _copy, _копия
+    const re4 = /[\s_.-]+(copy|копия)\d*$/;
+    if (re4.test(s)) { s = s.replace(re4, ''); changed = true; continue; }
+    // _1, -1, .1, пробел+1 — числовой суффикс ТОЛЬКО с разделителем перед ним
+    const re5 = /[\s_.-]+\d+$/;
+    if (re5.test(s)) { s = s.replace(re5, ''); changed = true; continue; }
+  }
+  return s.trim();
+}
+
 // Расстояние Левенштейна с ранним выходом по порогу.
 // Если расстояние превысит maxDistance — возвращает maxDistance + 1 не дочитывая.
 // Без раннего выхода был бы O(m*n) на каждое сравнение, что для тысяч файлов медленно.
