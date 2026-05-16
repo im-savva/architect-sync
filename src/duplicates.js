@@ -1,7 +1,7 @@
 import path from 'node:path';
 import ora from 'ora';
 import pc from 'picocolors';
-import { checkbox, confirm } from '@inquirer/prompts';
+import { checkboxWithCancel, confirmWithCancel } from './prompts.js';
 import { scanDirectory } from './scanner.js';
 import {
   hashFile,
@@ -13,29 +13,6 @@ import {
   stripVersionSuffix,
 } from './utils.js';
 import { moveToTrash, makeTrashBatchPath, pruneEmptyDirs } from './trash.js';
-
-// Восстанавливает stdin после прерывания checkbox/select через Ctrl+C.
-// На Windows inquirer не всегда корректно сбрасывает raw mode и/или listeners,
-// в результате следующий prompt не воспринимает клавиатуру.
-//
-// Делаем три вещи:
-//   1. Гарантируем что stdin не в raw mode.
-//   2. Снимаем висящие keypress / data слушатели от inquirer.
-//   3. Делаем stdin.resume() — на случай если он был запаузен.
-function recoverStdin() {
-  try {
-    if (process.stdin.isTTY && process.stdin.isRaw) {
-      process.stdin.setRawMode(false);
-    }
-  } catch {}
-  try {
-    process.stdin.removeAllListeners('keypress');
-    process.stdin.removeAllListeners('data');
-  } catch {}
-  try {
-    process.stdin.resume();
-  } catch {}
-}
 
 // Минимальная длина «голого имени» (после снятия версионных хвостов).
 // Имена короче 4 символов — не считаем версионной серией. Это отсекает
@@ -180,20 +157,13 @@ async function interactiveSelectForDeletion(groups, { groupLabel }) {
 
     let selected;
     try {
-      selected = await checkbox({
+      selected = await checkboxWithCancel({
         message: 'Отметьте файлы для удаления (Space — отметить, Enter — подтвердить, Ctrl+C — пропустить группу):',
         choices,
         pageSize: 15,
       });
     } catch (err) {
-      if (
-        err?.name === 'AbortPromptError' ||
-        err?.name === 'ExitPromptError' ||
-        err?.code === 'ABORT_ERR'
-      ) {
-        // На Windows inquirer не всегда чистит raw mode после Ctrl+C —
-        // следующий чекбокс перестаёт реагировать на ввод. Чиним вручную.
-        recoverStdin();
+      if (err?.isBack) {
         console.log(pc.dim('  Группа пропущена'));
         continue;
       }
@@ -320,14 +290,9 @@ async function confirmAndApply(sourceRoot, toDelete) {
 
   let ok;
   try {
-    ok = await confirm({ message: 'Удалить отмеченные файлы?', default: false });
+    ok = await confirmWithCancel({ message: 'Удалить отмеченные файлы?', default: false });
   } catch (err) {
-    if (
-      err?.name === 'AbortPromptError' ||
-      err?.name === 'ExitPromptError' ||
-      err?.code === 'ABORT_ERR'
-    ) {
-      recoverStdin();
+    if (err?.isBack) {
       console.log(pc.dim('  Отменено'));
       return;
     }
