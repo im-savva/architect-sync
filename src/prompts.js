@@ -345,4 +345,4 @@ export async function pickProject(projects, message) {
   return result;
 }
 
-export { selectWithBack as select, confirm, checkbox };
+export { selectWithBack as select, confirm, inquirerCheckbox as checkbox };
