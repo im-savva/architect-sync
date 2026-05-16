@@ -18,7 +18,6 @@ export function screen(sectionTitle) {
   }
   console.log(pc.dim('  ' + RULE));
   console.log();
-  console.log();
 }
 
 export function showHeader() {
