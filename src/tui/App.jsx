@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, createContext, useContext } from 'react';
-import { Box, Text, useApp } from 'ink';
+import { Box, Text, useApp, useInput } from 'ink';
 import { loadConfig, saveConfig, defaultConfig, isDevMode } from '../config.js';
 import { Frame, Busy } from './components.jsx';
 import { ProjectSelectScreen } from './screens/ProjectSelect.jsx';
@@ -34,6 +34,12 @@ export default function App() {
   const [cfg, setCfg] = useState(null);
   const [loaded, setLoaded] = useState(false);
   const [stack, setStack] = useState([{ name: 'projects', props: {} }]);
+
+  // Всегда-активный пустой обработчик ввода. Без него, когда на экране
+  // временно нет ни одного активного useInput (загрузка, busy-состояния),
+  // Ink выключает raw mode у stdin, а повторное включение на Windows
+  // ломает стрелки — клавиши перестают приходить.
+  useInput(() => {});
 
   useEffect(() => {
     (async () => {
