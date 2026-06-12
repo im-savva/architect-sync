@@ -35,11 +35,21 @@ export default function App() {
   const [loaded, setLoaded] = useState(false);
   const [stack, setStack] = useState([{ name: 'projects', props: {} }]);
 
-  // Всегда-активный пустой обработчик ввода. Без него, когда на экране
-  // временно нет ни одного активного useInput (загрузка, busy-состояния),
-  // Ink выключает raw mode у stdin, а повторное включение на Windows
-  // ломает стрелки — клавиши перестают приходить.
-  useInput(() => {});
+  // Всегда-активный обработчик ввода. Без него, когда на экране временно нет
+  // ни одного активного useInput (загрузка, busy-состояния), Ink выключает
+  // raw mode у stdin, а повторное включение на Windows ломает стрелки —
+  // клавиши перестают приходить.
+  // Заодно — диагностика: SYNCA_DEBUG_KEYS=1 показывает каждое нажатие внизу.
+  const [debugKeys, setDebugKeys] = useState('');
+  useInput((input, key) => {
+    if (process.env.SYNCA_DEBUG_KEYS) {
+      const flags = Object.entries(key)
+        .filter(([, v]) => v)
+        .map(([k]) => k)
+        .join(',');
+      setDebugKeys(`нажатие: input=${JSON.stringify(input)} key=${flags || '—'}`);
+    }
+  });
 
   useEffect(() => {
     (async () => {
@@ -79,7 +89,10 @@ export default function App() {
   const Screen = SCREENS[top.name];
   return (
     <AppCtx.Provider value={ctx}>
-      {Screen ? <Screen {...top.props} /> : <Text>Неизвестный экран: {top.name}</Text>}
+      <Box flexDirection="column">
+        {Screen ? <Screen {...top.props} /> : <Text>Неизвестный экран: {top.name}</Text>}
+        {process.env.SYNCA_DEBUG_KEYS ? <Text color="magenta">{debugKeys || 'DEBUG KEYS: жду нажатий…'}</Text> : null}
+      </Box>
     </AppCtx.Provider>
   );
 }
