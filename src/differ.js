@@ -1,5 +1,4 @@
 import path from 'node:path';
-import ora from 'ora';
 import { hashFile, nativeRel } from './utils.js';
 
 // Phase 1: сравнение по метаданным.
@@ -46,32 +45,33 @@ export function diffPhase1(sourceFiles, destFiles, stateIndex) {
 // и сравниваем с хэшем из state.json. Если хэш совпадает — файл не изменился.
 // Дополнительно: страховочная выборка из identicalCandidates (1 из 200) для защиты от bitrot.
 //
+// onProgress({ done, total }) — вызывается после каждого файла.
+//
 // Возвращает:
 //   modified — реально изменённые (нужно перекопировать)
 //   newHashes — Map<relPath, xxhash> — хэши source файлов, посчитанные в этой фазе (для будущего state.json)
-export async function diffPhase2(sourceRoot, modifiedCandidates, identicalCandidates, stateIndex) {
+export async function diffPhase2(
+  sourceRoot,
+  modifiedCandidates,
+  identicalCandidates,
+  stateIndex,
+  { onProgress } = {}
+) {
   const modified = [];
   const newHashes = new Map();
 
-  const totalCandidates = modifiedCandidates.length;
   const bitrotSample = identicalCandidates.filter((_, i) => i % 200 === 0);
-  const totalToHash = totalCandidates + bitrotSample.length;
+  const total = modifiedCandidates.length + bitrotSample.length;
 
-  if (totalToHash === 0) {
+  if (total === 0) {
     return { modified, newHashes };
   }
 
-  const totalBytes =
-    modifiedCandidates.reduce((s, f) => s + f.size, 0) +
-    bitrotSample.reduce((s, f) => s + f.size, 0);
-
-  const spinner = ora({
-    text: `Проверяю содержимое (0 / ${totalToHash})…`,
-    spinner: 'dots',
-  }).start();
-
   let done = 0;
-  let bytesDone = 0;
+  const tick = () => {
+    done++;
+    if (onProgress) onProgress({ done, total });
+  };
 
   for (const src of modifiedCandidates) {
     const srcPath = path.join(sourceRoot, nativeRel(src.relPath));
@@ -81,7 +81,7 @@ export async function diffPhase2(sourceRoot, modifiedCandidates, identicalCandid
     } catch {
       // не смогли посчитать — считаем что изменён
       modified.push(src);
-      done++;
+      tick();
       continue;
     }
     newHashes.set(src.relPath, hash);
@@ -92,9 +92,7 @@ export async function diffPhase2(sourceRoot, modifiedCandidates, identicalCandid
     } else {
       modified.push(src);
     }
-    done++;
-    bytesDone += src.size;
-    spinner.text = `Проверяю содержимое (${done} / ${totalToHash})…`;
+    tick();
   }
 
   // Страховочная выборка — проверяем что source файл действительно совпадает с тем что в state.json
@@ -104,7 +102,7 @@ export async function diffPhase2(sourceRoot, modifiedCandidates, identicalCandid
     try {
       hash = await hashFile(srcPath);
     } catch {
-      done++;
+      tick();
       continue;
     }
     newHashes.set(src.relPath, hash);
@@ -113,12 +111,8 @@ export async function diffPhase2(sourceRoot, modifiedCandidates, identicalCandid
       // хэш source не совпадает с тем что записано в state — значит файл изменился, но mtime/size не выдали
       modified.push(src);
     }
-    done++;
-    bytesDone += src.size;
-    spinner.text = `Проверяю содержимое (${done} / ${totalToHash})…`;
+    tick();
   }
-
-  spinner.succeed(`Проверка содержимого завершена (${totalToHash} файлов)`);
 
   return { modified, newHashes };
 }

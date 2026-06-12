@@ -1,11 +1,14 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
-import { writeJsonAtomic } from './utils.js';
+import { writeJsonAtomic, readJson } from './utils.js';
+import { makeRunId } from './snapshots.js';
 
-const MAX_LOGS = 30;
+const MAX_LOGS = 60;
 
-export function createRunLog({ source, destination }) {
+export function createRunLog({ source, destination, runId, kind = 'sync' }) {
   return {
+    runId: runId ?? makeRunId(),
+    kind, // 'sync' | 'rollback'
     startedAt: new Date().toISOString(),
     finishedAt: null,
     source,
@@ -13,6 +16,7 @@ export function createRunLog({ source, destination }) {
     added: [],
     modified: [],
     trashed: [],
+    restored: [], // для kind: 'rollback'
     skipped: [],
     verifyFailures: [],
     totalBytes: 0,
@@ -21,25 +25,49 @@ export function createRunLog({ source, destination }) {
   };
 }
 
+function logsDir(destination) {
+  return path.join(destination, '.synca', 'logs');
+}
+
 export async function writeLog(destination, log) {
-  const logsDir = path.join(destination, '.synca', 'logs');
-  await fs.mkdir(logsDir, { recursive: true });
+  await fs.mkdir(logsDir(destination), { recursive: true });
 
   log.finishedAt = new Date().toISOString();
   log.durationMs = Date.parse(log.finishedAt) - Date.parse(log.startedAt);
 
-  const ts = log.startedAt.replace(/:/g, '-').replace(/\..+/, '').replace('T', '_');
-  const logPath = path.join(logsDir, `${ts}.json`);
+  const logPath = path.join(logsDir(destination), `${log.runId}.json`);
   await writeJsonAtomic(logPath, log);
   return logPath;
 }
 
-// Удаляет логи старше MAX_LOGS штук, оставляя самые свежие.
-export async function rotateLogs(destination) {
-  const logsDir = path.join(destination, '.synca', 'logs');
+// Все логи запусков, от новых к старым.
+export async function readLogs(destination) {
   let entries;
   try {
-    entries = await fs.readdir(logsDir);
+    entries = await fs.readdir(logsDir(destination));
+  } catch {
+    return [];
+  }
+  const result = [];
+  for (const name of entries.filter((n) => n.endsWith('.json')).sort().reverse()) {
+    try {
+      const log = await readJson(path.join(logsDir(destination), name));
+      // у старых логов не было runId — берём из имени файла
+      if (!log.runId) log.runId = name.replace(/\.json$/, '');
+      if (!log.kind) log.kind = 'sync';
+      result.push(log);
+    } catch {
+      // битый лог пропускаем
+    }
+  }
+  return result;
+}
+
+// Удаляет логи старше MAX_LOGS штук, оставляя самые свежие.
+export async function rotateLogs(destination) {
+  let entries;
+  try {
+    entries = await fs.readdir(logsDir(destination));
   } catch {
     return;
   }
@@ -48,7 +76,7 @@ export async function rotateLogs(destination) {
   const toDelete = logs.slice(0, logs.length - MAX_LOGS);
   for (const name of toDelete) {
     try {
-      await fs.unlink(path.join(logsDir, name));
+      await fs.unlink(path.join(logsDir(destination), name));
     } catch {
       // молча игнорируем — лог не критичен
     }

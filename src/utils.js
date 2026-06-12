@@ -125,6 +125,25 @@ export function truncatePath(p, max = 60) {
   return '...' + p.slice(-(max - 3));
 }
 
+// Человекочитаемая дата для UI: «только что», «2 ч назад», «вчера 18:40», «3 июн 14:02».
+const MONTHS_RU = ['янв', 'фев', 'мар', 'апр', 'мая', 'июн', 'июл', 'авг', 'сен', 'окт', 'ноя', 'дек'];
+export function formatRelativeDate(value) {
+  const d = value instanceof Date ? value : new Date(value);
+  if (isNaN(d)) return '—';
+  const now = new Date();
+  const diffMs = now - d;
+  const hhmm = `${d.getHours()}:${String(d.getMinutes()).padStart(2, '0')}`;
+  if (diffMs < 60 * 1000) return 'только что';
+  if (diffMs < 60 * 60 * 1000) return `${Math.floor(diffMs / 60000)} мин назад`;
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  if (d >= startOfToday) return `сегодня ${hhmm}`;
+  const startOfYesterday = new Date(startOfToday - 24 * 60 * 60 * 1000);
+  if (d >= startOfYesterday) return `вчера ${hhmm}`;
+  const sameYear = d.getFullYear() === now.getFullYear();
+  const datePart = `${d.getDate()} ${MONTHS_RU[d.getMonth()]}${sameYear ? '' : ' ' + d.getFullYear()}`;
+  return `${datePart} ${hhmm}`;
+}
+
 // Нормализация relPath для манифеста (всегда forward slashes для кроссплатформенности).
 export function normalizeRel(relPath) {
   return relPath.split(path.sep).join('/');

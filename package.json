@@ -1,23 +1,29 @@
 {
   "name": "synca",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Интерактивная синхронизация проектов между папками",
   "type": "module",
   "bin": {
     "synca": "./bin/synca.js"
   },
   "scripts": {
-    "start": "node bin/synca.js"
+    "start": "node bin/synca.js",
+    "dev": "node build.mjs && node bin/synca.js --dev",
+    "build": "node build.mjs",
+    "prepare": "node build.mjs",
+    "test:engine": "node scripts/engine-test.mjs"
   },
   "engines": {
     "node": ">=20"
   },
   "dependencies": {
-    "@inquirer/prompts": "^7.0.0",
-    "cli-progress": "^3.12.0",
-    "cli-table3": "^0.6.5",
-    "ora": "^8.1.0",
+    "ink": "^5.2.0",
+    "ink-text-input": "^6.0.0",
     "picocolors": "^1.1.0",
+    "react": "^18.3.1",
     "xxhash-addon": "^2.0.3"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
   }
 }

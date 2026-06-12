@@ -1,8 +1,6 @@
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
-import pc from 'picocolors';
-import { inputWithBack as input } from './prompts.js';
 import { isWindows, writeJsonAtomic, readJson, pathExists, pathContains } from './utils.js';
 
 const CONFIG_VERSION = 1;
@@ -17,13 +15,23 @@ const DEFAULT_IGNORE = [
   '.synca',
 ];
 
+// Скрытый dev-режим (--dev): отдельный конфиг, чтобы тесты не трогали боевой.
+let devMode = false;
+export function setDevMode(on) {
+  devMode = Boolean(on);
+}
+export function isDevMode() {
+  return devMode;
+}
+
 export function getConfigPath() {
+  const fileName = devMode ? 'config.dev.json' : 'config.json';
   if (isWindows) {
     const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
-    return path.join(appData, 'synca', 'config.json');
+    return path.join(appData, 'synca', fileName);
   }
   const xdg = process.env.XDG_CONFIG_HOME || path.join(os.homedir(), '.config');
-  return path.join(xdg, 'synca', 'config.json');
+  return path.join(xdg, 'synca', fileName);
 }
 
 export function defaultConfig() {
@@ -32,6 +40,7 @@ export function defaultConfig() {
     projects: [],
     ignore: [...DEFAULT_IGNORE],
     trashRetentionPercent: 10,
+    snapshotMinKeep: 3,
     verifyAfterCopy: true,
   };
 }
@@ -44,14 +53,14 @@ export async function loadConfig() {
     if (!cfg.projects) cfg.projects = [];
     if (!cfg.ignore) cfg.ignore = [...DEFAULT_IGNORE];
     if (cfg.trashRetentionPercent == null) cfg.trashRetentionPercent = 10;
+    if (cfg.snapshotMinKeep == null) cfg.snapshotMinKeep = 3;
     if (cfg.verifyAfterCopy == null) cfg.verifyAfterCopy = true;
     return cfg;
-  } catch (err) {
+  } catch {
     // Битый конфиг — переименуем и начнём заново.
     const broken = configPath + '.broken-' + Date.now() + '.json';
     try {
       await fs.rename(configPath, broken);
-      console.error(pc.yellow(`Конфиг повреждён, переименован в ${broken}`));
     } catch {
       // если переименовать не получилось, ничего страшного
     }
@@ -83,56 +92,4 @@ export async function validateProject(project) {
     return 'Папка источника находится внутри назначения.';
   }
   return null;
-}
-
-// Wizard для добавления нового проекта. Возвращает project object или null если отменили
-// (пользователь нажал Ctrl+C на любом шаге).
-// Заголовок раздела рисует вызывающая сторона через screen().
-export async function projectWizard(existingNames = []) {
-  try {
-    const name = await input({
-      message: 'Название проекта (для отображения в меню):',
-      validate: (v) => {
-        if (!v.trim()) return 'Название не может быть пустым';
-        if (existingNames.includes(v.trim())) return 'Проект с таким названием уже есть';
-        return true;
-      },
-    });
-
-    const source = await input({
-      message: 'Путь к папке источника (откуда копировать):',
-      validate: async (v) => {
-        const trimmed = v.trim();
-        if (!trimmed) return 'Путь не может быть пустым';
-        if (!(await pathExists(trimmed))) return 'Папка не существует';
-        try {
-          const st = await fs.stat(trimmed);
-          if (!st.isDirectory()) return 'Это не папка';
-        } catch {
-          return 'Не удаётся прочитать';
-        }
-        return true;
-      },
-    });
-
-    const destination = await input({
-      message: 'Путь к папке назначения (куда копировать, бэкап):',
-      validate: async (v) => {
-        const trimmed = v.trim();
-        if (!trimmed) return 'Путь не может быть пустым';
-        const err = await validateProject({ source: source.trim(), destination: trimmed });
-        if (err) return err;
-        return true;
-      },
-    });
-
-    return {
-      name: name.trim(),
-      source: path.resolve(source.trim()),
-      destination: path.resolve(destination.trim()),
-    };
-  } catch (err) {
-    if (err?.isBack) return null;
-    throw err;
-  }
 }

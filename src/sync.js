@@ -5,10 +5,8 @@ import { pipeline } from 'node:stream/promises';
 import { Transform } from 'node:stream';
 import xxhashAddon from 'xxhash-addon';
 const { XXHash64 } = xxhashAddon;
-import cliProgress from 'cli-progress';
-import pc from 'picocolors';
-import { toLongPath, nativeRel, formatBytes, sleep, truncatePath } from './utils.js';
-import { moveToTrash, makeTrashBatchPath, pruneEmptyDirs } from './trash.js';
+import { toLongPath, nativeRel, sleep } from './utils.js';
+import { pruneEmptyDirs } from './trash.js';
 
 const HASH_SEED = Buffer.from([0, 0, 0, 0, 0, 0, 0, 1]);
 const COPY_BUFFER = 64 * 1024;
@@ -29,8 +27,8 @@ function hashTransform(onChunk) {
   return stream;
 }
 
-// Копирует один файл атомарно. Возвращает { hash, verified } или бросает.
-async function copyOneFile(srcAbs, dstAbs, { verifyAfterCopy, onChunk }) {
+// Копирует один файл атомарно. Возвращает { hash } или бросает.
+export async function copyOneFile(srcAbs, dstAbs, { verifyAfterCopy, onChunk } = {}) {
   await fs.mkdir(path.dirname(dstAbs), { recursive: true });
   const tmpAbs = dstAbs + '.synca-tmp';
 
@@ -110,7 +108,7 @@ async function copyOneFile(srcAbs, dstAbs, { verifyAfterCopy, onChunk }) {
 }
 
 // Копирует с retry на EBUSY/EPERM
-async function copyWithRetry(srcAbs, dstAbs, options) {
+export async function copyWithRetry(srcAbs, dstAbs, options) {
   let lastErr;
   for (let attempt = 1; attempt <= LOCK_RETRIES; attempt++) {
     try {
@@ -133,41 +131,57 @@ async function copyWithRetry(srcAbs, dstAbs, options) {
   throw lastErr;
 }
 
-// Применяет изменения. Принимает:
+// Применяет изменения. Никакого вывода — о прогрессе сообщает через колбэки.
+//
 //   sourceRoot, destination — корни
 //   added, modified, trashed — списки { relPath, size, mtime }
-//   stateFiles — текущий list state.json (будет дополняться по мере успешных копирований)
+//   newHashesFromDiff — Map<relPath, hash> — хэши из phase 2
+//   stateFiles — текущий list state.json (стартовое состояние)
 //   log — объект из createRunLog (мутируется по ходу)
-//   options.verifyAfterCopy
-//   options.onPartialState(stateFiles) — вызывается после каждого успешного копирования
-//                                        и в конце; должен сохранять state атомарно.
-//                                        Это нужно для graceful abort.
-//   options.abortSignal — { aborted: bool } объект, читаемый между файлами
+//   snapshot — SnapshotWriter | null: старые версии перезаписанных/удалённых файлов
+//              уезжают туда (вместо безвозвратной потери)
+//   verifyAfterCopy — пересчитывать хэш после записи
+//   onPartialState(stateFiles) — вызывается после каждого успешного файла (для graceful abort)
+//   onProgress({ phase, bytesDone, totalBytes, filesDone, filesTotal, relPath }) — прогресс
+//   abortSignal — { aborted: bool }, читается между файлами
 export async function applyChanges({
   sourceRoot,
   destination,
   added,
   modified,
   trashed,
-  newHashesFromDiff, // Map<relPath, hash> — хэши из phase 2 (для уже модифицированных кандидатов)
+  newHashesFromDiff,
   stateFiles,
   log,
+  snapshot,
   verifyAfterCopy,
   onPartialState,
+  onProgress,
   abortSignal,
 }) {
-  const trashBatch = trashed.length ? makeTrashBatchPath(destination) : null;
-
   // Индекс существующих файлов в state — будем обновлять
   const stateMap = new Map(stateFiles.map((f) => [f.relPath, f]));
 
-  // Сначала удаления (в корзину) — освобождают место.
-  // После каждого удаления убираем опустевшие родительские папки,
-  // чтобы не оставлять мусор пустых директорий в destination.
+  // Сначала удаления (в снэпшот) — освобождают место.
+  // После каждого удаления убираем опустевшие родительские папки.
+  let trashedDone = 0;
   for (const f of trashed) {
     if (abortSignal && abortSignal.aborted) break;
+    if (onProgress) {
+      onProgress({
+        phase: 'trash',
+        filesDone: trashedDone,
+        filesTotal: trashed.length,
+        relPath: f.relPath,
+      });
+    }
     try {
-      await moveToTrash(destination, f.relPath, trashBatch);
+      const prior = stateMap.get(f.relPath);
+      if (snapshot) {
+        await snapshot.stash(f.relPath, 'deleted', { xxhash: prior?.xxhash });
+      } else {
+        await fs.unlink(toLongPath(path.join(destination, nativeRel(f.relPath))));
+      }
       log.trashed.push({ relPath: f.relPath, size: f.size });
       stateMap.delete(f.relPath);
       const srcDir = path.dirname(path.join(destination, nativeRel(f.relPath)));
@@ -176,73 +190,56 @@ export async function applyChanges({
     } catch (err) {
       log.skipped.push({ relPath: f.relPath, reason: 'trash-failed: ' + err.code });
     }
+    trashedDone++;
   }
 
-  // Копирования: added + modified, считаем общий объём
+  // Копирования: added + modified
   const toCopy = [...added, ...modified];
   const totalBytes = toCopy.reduce((s, f) => s + f.size, 0);
-
-  let progressBar = null;
-  if (totalBytes > 0) {
-    progressBar = new cliProgress.SingleBar(
-      {
-        format:
-          '  ' +
-          pc.cyan('{bar}') +
-          ' {percentage}% │ {valueFormatted} / {totalFormatted} │ {fileLine}',
-        barCompleteChar: '█',
-        barIncompleteChar: '░',
-        barsize: 30,
-        hideCursor: true,
-        clearOnComplete: false,
-      },
-      cliProgress.Presets.shades_classic
-    );
-    progressBar.start(totalBytes, 0, {
-      valueFormatted: formatBytes(0),
-      totalFormatted: formatBytes(totalBytes),
-      fileLine: '',
-    });
-  }
-
   let bytesDone = 0;
+  let filesDone = 0;
+
+  const report = (relPath, extraBytes = 0) => {
+    if (onProgress) {
+      onProgress({
+        phase: 'copy',
+        bytesDone: bytesDone + extraBytes,
+        totalBytes,
+        filesDone,
+        filesTotal: toCopy.length,
+        relPath,
+      });
+    }
+  };
 
   for (const f of toCopy) {
     if (abortSignal && abortSignal.aborted) break;
 
     const srcAbs = path.join(sourceRoot, nativeRel(f.relPath));
     const dstAbs = path.join(destination, nativeRel(f.relPath));
-    const isNew = !stateMap.has(f.relPath);
+    const prior = stateMap.get(f.relPath);
+    const isNew = !prior;
 
-    if (progressBar) {
-      progressBar.update(bytesDone, {
-        valueFormatted: formatBytes(bytesDone),
-        totalFormatted: formatBytes(totalBytes),
-        fileLine: truncatePath(f.relPath, 40),
-      });
+    report(f.relPath);
+
+    // Перед перезаписью существующий файл уезжает в снэпшот
+    let stashed = false;
+    if (!isNew && snapshot) {
+      try {
+        stashed = await snapshot.stash(f.relPath, 'overwritten', { xxhash: prior?.xxhash });
+      } catch {
+        // не получилось сохранить старую версию — копируем поверх, как раньше
+      }
     }
 
     try {
       const { hash } = await copyWithRetry(srcAbs, dstAbs, {
         verifyAfterCopy,
-        onChunk: (n) => {
-          if (progressBar) {
-            progressBar.update(bytesDone + n, {
-              valueFormatted: formatBytes(bytesDone + n),
-              totalFormatted: formatBytes(totalBytes),
-              fileLine: truncatePath(f.relPath, 40),
-            });
-          }
-        },
+        onChunk: (n) => report(f.relPath, n),
       });
       bytesDone += f.size;
-      if (progressBar) {
-        progressBar.update(bytesDone, {
-          valueFormatted: formatBytes(bytesDone),
-          totalFormatted: formatBytes(totalBytes),
-          fileLine: truncatePath(f.relPath, 40),
-        });
-      }
+      filesDone++;
+      report(f.relPath);
 
       const entry = {
         relPath: f.relPath,
@@ -252,11 +249,20 @@ export async function applyChanges({
       };
       stateMap.set(f.relPath, entry);
       log.totalBytes += f.size;
-      if (isNew) log.added.push(entry);
-      else log.modified.push(entry);
+      if (isNew) {
+        log.added.push(entry);
+        if (snapshot) snapshot.recordAdded(f.relPath);
+      } else {
+        log.modified.push(entry);
+      }
 
       if (onPartialState) await onPartialState([...stateMap.values()]);
     } catch (err) {
+      // Копирование сорвалось: вернём старую версию из снэпшота на место,
+      // чтобы бэкап не остался без файла вовсе.
+      if (stashed) {
+        await snapshot.unstash(f.relPath);
+      }
       if (err.code === 'VERIFY_MISMATCH') {
         log.verifyFailures.push({ relPath: f.relPath, reason: 'verify-mismatch' });
       } else if (err.code === 'EBUSY' || err.code === 'EPERM' || err.code === 'EACCES') {
@@ -267,10 +273,9 @@ export async function applyChanges({
         log.skipped.push({ relPath: f.relPath, reason: (err.code || 'error') + ': ' + err.message });
       }
       bytesDone += f.size;
+      filesDone++;
     }
   }
-
-  if (progressBar) progressBar.stop();
 
   return { stateFiles: [...stateMap.values()] };
 }
